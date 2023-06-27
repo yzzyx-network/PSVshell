@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <psp2kern/kernel/sysmem/memtype.h>
 
 #include "main.h"
 #include "gui.h"
@@ -14,6 +15,9 @@
 #include "oc.h"
 #include "profile.h"
 
+// allow both cross and circle button to confirm
+#define BTN_CONFIRM (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE)
+
 int vsnprintf(char *s, size_t n, const char *format, va_list arg);
 
 static SceDisplayFrameBuf g_gui_fb = {
@@ -22,6 +26,10 @@ static SceDisplayFrameBuf g_gui_fb = {
     .pitch  = 960,
 };
 static int g_gui_fb_last_width = 960;
+static short osd_move_dir = 1;
+static float osd_move_counter = 0;
+static short fps_move_dir = 1;
+static float fps_move_counter = 0;
 static float g_gui_fb_w_ratio = 1.0f;
 static float g_gui_fb_h_ratio = 1.0f;
 
@@ -49,8 +57,9 @@ static bool g_gui_lazydraw_memusage = false;
 static const unsigned char GUI_CORNERS_XD[GUI_CORNERS_XD_RADIUS] = {9, 7, 5, 4, 3, 2, 2, 1, 1};
 
 static const rgba_t WHITE = {.rgba = {.r = 255, .g = 255, .b = 255, .a = 255}};
-static const rgba_t BLACK = {.rgba = {.r = 0, .g = 0, .b = 0, .a = 0}};
+static const rgba_t BLACK = {.rgba = {.r = 0, .g = 0, .b = 0, .a = 255}};
 static const rgba_t FPS_COLOR = {.rgba = {.r = 0, .g = 255, .b = 0, .a = 255}};
+static const rgba_t FPS_COLOR_OLED = { .rgba = {.r = 0, .g = 204, .b = 68, .a = 255} };
 
 psvs_gui_mode_t psvs_gui_get_mode() {
     return g_gui_mode;
@@ -62,6 +71,7 @@ static psvs_oc_device_t _psvs_gui_get_device_from_menuctrl(psvs_gui_menu_control
         case PSVS_GUI_MENUCTRL_GPU_ES4:  return PSVS_OC_DEVICE_GPU_ES4;
         case PSVS_GUI_MENUCTRL_BUS:      return PSVS_OC_DEVICE_BUS;
         case PSVS_GUI_MENUCTRL_GPU_XBAR: return PSVS_OC_DEVICE_GPU_XBAR;
+        case PSVS_GUI_MENUCTRL_VENEZIA:  return PSVS_OC_DEVICE_VENEZIA;
         default: return PSVS_OC_DEVICE_MAX;
     }
     return PSVS_OC_DEVICE_MAX;
@@ -95,7 +105,7 @@ void psvs_gui_input_check(uint32_t buttons) {
 
         // Profile label
         if (g_gui_menu_control == PSVS_GUI_MENUCTRL_PROFILE) {
-            if (buttons_new & SCE_CTRL_CROSS) {
+            if (buttons_new & BTN_CONFIRM) {
                 bool global = buttons & GUI_GLOBAL_PROFILE_BUTTON_MOD;
                 if ((!global && psvs_oc_has_changed()) || !psvs_profile_exists(global)) {
                     psvs_profile_save(global);
@@ -117,13 +127,13 @@ void psvs_gui_input_check(uint32_t buttons) {
                     psvs_oc_change_manual(device, false);
                 }
                 // Back to default
-                else if (buttons_new & SCE_CTRL_CROSS) {
+                else if (buttons_new & BTN_CONFIRM) {
                     psvs_oc_set_mode(device, PSVS_OC_MODE_DEFAULT);
                 }
             }
             // In default freq mode
             else {
-                if (buttons_new & SCE_CTRL_CROSS) {
+                if (buttons_new & BTN_CONFIRM) {
                     psvs_oc_reset_manual(device);
                     psvs_oc_set_mode(device, PSVS_OC_MODE_MANUAL);
                 }
@@ -152,7 +162,7 @@ void psvs_gui_set_framebuf(const SceDisplayFrameBuf *pParam) {
         g_gui_font_width = 9; // <- trim last col, better scaling
         g_gui_font_height = 18;
     } else {
-        // 960x544 - Terminus 12x24 Bold
+        // 960x544 or more - Terminus 12x24 Bold
         g_gui_font = FONT_TER_U24B;
         g_gui_font_width = 12;
         g_gui_font_height = 24;
@@ -224,7 +234,7 @@ static void _psvs_gui_dd_prchar(const char character, int x, int y) {
             uint8_t charByte = g_gui_font[charPosH + (xx_font / 8)];
 
             if ((charByte >> (7 - (xx_font % 8))) & 1) {
-                ksceKernelMemcpyKernelToUser((uintptr_t)(px + xx), &FPS_COLOR, sizeof(rgba_t));
+                *(px + xx) = (g_gui_mode == PSVS_GUI_MODE_FPS_OLED) ? FPS_COLOR_OLED : FPS_COLOR;
             }
         }
     }
@@ -235,9 +245,47 @@ void psvs_gui_dd_fps() {
     snprintf(buf, 4, "%d", psvs_perf_get_fps());
     size_t len = strlen(buf);
 
-    for (int i = 0; i < len; i++) {
-        _psvs_gui_dd_prchar(buf[i], 10 + i * g_gui_font_width * g_gui_font_scale, 10);
+    uint32_t dacr;
+    DACR_UNRESTRICT(dacr);
+
+    float shift = 0;
+    if (g_gui_mode == PSVS_GUI_MODE_FPS_OLED) {
+        shift = fps_move_counter;
     }
+
+    for (int i = 0; i < len; i++) {
+        _psvs_gui_dd_prchar(buf[i], shift + i * g_gui_font_width * g_gui_font_scale, 10);
+    }
+
+    if (g_gui_mode == PSVS_GUI_MODE_FPS_OLED) {
+        fps_move_counter += (float)fps_move_dir / 300;
+        if (fps_move_counter > g_gui_fb.width - 30) {
+            fps_move_counter -= 3;
+            fps_move_dir = -1;
+        }
+        else if (fps_move_counter < 0) {
+            fps_move_counter += 3;
+            fps_move_dir = 1;
+        }
+    }
+
+    DACR_RESET(dacr);
+}
+
+void psvs_gui_dd_battery() {
+    char buf[6] = "";
+    snprintf(buf, 6, "%d%%", psvs_perf_get_batt()->percent);
+    size_t len = strlen(buf);
+
+    uint32_t dacr;
+    DACR_UNRESTRICT(dacr);
+
+    for (int i = 1; i <= len; i++) {
+        _psvs_gui_dd_prchar(buf[len - i],
+                            g_gui_fb.width - 10 - i * g_gui_font_width * g_gui_font_scale, 10);
+    }
+
+    DACR_RESET(dacr);
 }
 
 void psvs_gui_clear() {
@@ -424,7 +472,12 @@ static void _psvs_gui_draw_battery(int x, int y, int state, bool is_charging, rg
 
 void psvs_gui_draw_osd_template() {
     psvs_gui_set_back_color(0, 0, 0, 255);
-    psvs_gui_set_text_color(255, 255, 255, 255);
+    if (g_gui_mode == PSVS_GUI_MODE_OSD) {
+        psvs_gui_set_text_color(255, 255, 255, 255);
+    }
+    else {
+        psvs_gui_set_text_color(0, 255, 0, 255);
+    }
     psvs_gui_clear();
 
     // CPU
@@ -499,7 +552,7 @@ void psvs_gui_draw_template() {
 
     // Header
     psvs_gui_set_text_scale(0.5f);
-    psvs_gui_printf(GUI_ANCHOR_CX2(13, 0.5f),     GUI_ANCHOR_TY(8, 0), PSVS_VERSION_STRING);
+    psvs_gui_printf(GUI_ANCHOR_CX2(18, 0.5f),     GUI_ANCHOR_TY(8, 0), PSVS_VERSION_STRING);
     psvs_gui_printf(GUI_ANCHOR_RX2(10, 10, 0.5f), GUI_ANCHOR_TY(8, 0), "by Electry");
     psvs_gui_set_text_scale(1.0f);
 
@@ -520,10 +573,11 @@ void psvs_gui_draw_template() {
     psvs_gui_printf(GUI_ANCHOR_LX(10, 0),  GUI_ANCHOR_TY(56, 5), "PHY:");
 
     // Menu
-    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 5), "CPU [         ]");
-    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 4), "ES4 [         ]");
-    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 3), "BUS [         ]");
-    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 2), "XBR [         ]");
+    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 6), "CPU [         ]");
+    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 5), "ES4 [         ]");
+    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 4), "BUS [         ]");
+    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 3), "XBR [         ]");
+    psvs_gui_printf(GUI_ANCHOR_CX(15),     GUI_ANCHOR_BY(10, 2), "VNZ [         ]");
 }
 
 void psvs_gui_draw_header() {
@@ -662,10 +716,11 @@ static void _psvs_gui_draw_menu_item(int lines, int clock, psvs_gui_menu_control
 }
 
 void psvs_gui_draw_menu() {
-    _psvs_gui_draw_menu_item(5, psvs_oc_get_freq(PSVS_OC_DEVICE_CPU), PSVS_GUI_MENUCTRL_CPU);
-    _psvs_gui_draw_menu_item(4, psvs_oc_get_freq(PSVS_OC_DEVICE_GPU_ES4), PSVS_GUI_MENUCTRL_GPU_ES4);
-    _psvs_gui_draw_menu_item(3, psvs_oc_get_freq(PSVS_OC_DEVICE_BUS), PSVS_GUI_MENUCTRL_BUS);
-    _psvs_gui_draw_menu_item(2, psvs_oc_get_freq(PSVS_OC_DEVICE_GPU_XBAR), PSVS_GUI_MENUCTRL_GPU_XBAR);
+    _psvs_gui_draw_menu_item(6, psvs_oc_get_freq(PSVS_OC_DEVICE_CPU), PSVS_GUI_MENUCTRL_CPU);
+    _psvs_gui_draw_menu_item(5, psvs_oc_get_freq(PSVS_OC_DEVICE_GPU_ES4), PSVS_GUI_MENUCTRL_GPU_ES4);
+    _psvs_gui_draw_menu_item(4, psvs_oc_get_freq(PSVS_OC_DEVICE_BUS), PSVS_GUI_MENUCTRL_BUS);
+    _psvs_gui_draw_menu_item(3, psvs_oc_get_freq(PSVS_OC_DEVICE_GPU_XBAR), PSVS_GUI_MENUCTRL_GPU_XBAR);
+    _psvs_gui_draw_menu_item(2, psvs_oc_get_freq(PSVS_OC_DEVICE_VENEZIA), PSVS_GUI_MENUCTRL_VENEZIA);
 
     // Draw profile label separately
     bool show_global = g_gui_input_buttons & GUI_GLOBAL_PROFILE_BUTTON_MOD;
@@ -713,31 +768,59 @@ void psvs_gui_deinit() {
 }
 
 void psvs_gui_cpy() {
-    int height = (g_gui_mode == PSVS_GUI_MODE_OSD) ? GUI_OSD_HEIGHT : GUI_HEIGHT;
+    int height = (g_gui_mode == PSVS_GUI_MODE_OSD || g_gui_mode == PSVS_GUI_MODE_OSD_OLED) ? GUI_OSD_HEIGHT : GUI_HEIGHT;
 
-    int w = (int)(GUI_WIDTH * (g_gui_fb.width / 960.0f));
-    int h = (int)(height * (g_gui_fb.height / 544.0f));
-    int x = (g_gui_mode == PSVS_GUI_MODE_OSD) ? 10 : (g_gui_fb.width / 2) - (w / 2);
-    int y = (g_gui_mode == PSVS_GUI_MODE_OSD) ? 10 : (g_gui_fb.height / 2) - (h / 2);
+    int w = GUI_RESCALE_X(GUI_WIDTH);
+    int h = GUI_RESCALE_Y(height);
+    int x = 0;
+    if (g_gui_mode == PSVS_GUI_MODE_OSD) {
+        x = 0;
+    }
+    else if (g_gui_mode == PSVS_GUI_MODE_OSD_OLED) {
+        osd_move_counter += (float)osd_move_dir / 300;
+        if (osd_move_counter > g_gui_fb.width - w)
+        {
+            osd_move_counter -= 3;
+            osd_move_dir = -1;
+        }
+        else if (osd_move_counter < 0)
+        {
+            osd_move_counter += 3;
+            osd_move_dir = 1;
+        }
+        x = osd_move_counter;
+    }
+    else {
+        x = (g_gui_fb.width / 2) - (w / 2);
+    }
+    int y = (g_gui_mode == PSVS_GUI_MODE_OSD || g_gui_mode == PSVS_GUI_MODE_OSD_OLED) ? 10 : (g_gui_fb.height / 2) - (h / 2);
+
+    uint32_t dacr;
+    DACR_UNRESTRICT(dacr);
 
     for (int line = 0; line < h; line++) {
         int xd = 0;
-        int xd_line = line * (544.0f / g_gui_fb.height);
+        int xd_line = line;
+        if (g_gui_fb.height < 544.0f)
+            xd_line = xd_line * (544.0f / g_gui_fb.height);
 
         // Top corners
         if (xd_line < GUI_CORNERS_XD_RADIUS) {
-            xd = GUI_CORNERS_XD[xd_line] * (g_gui_fb.width / 960.0f);
+            xd = GUI_RESCALE_X(GUI_CORNERS_XD[xd_line]);
         }
-
         // Bottom corners
-        if (xd_line >= height - GUI_CORNERS_XD_RADIUS) {
-            xd = GUI_CORNERS_XD[height - xd_line - 1] * (g_gui_fb.width / 960.0f);
+        else if (xd_line >= height - GUI_CORNERS_XD_RADIUS) {
+            xd = GUI_RESCALE_X(GUI_CORNERS_XD[height - xd_line - 1]);
         }
 
         int off = ((line + y) * g_gui_fb.pitch + x + xd);
-        ksceKernelMemcpyKernelToUser(
-            (uintptr_t)&((rgba_t *)g_gui_fb.base)[off],
-            &((rgba_t *)g_gui_buffer)[line * GUI_WIDTH + xd],
-            sizeof(rgba_t) * (w - xd*2));
+
+        void *src = &((rgba_t *)g_gui_buffer)[line * GUI_WIDTH + xd];
+        void *dest = &((rgba_t *)g_gui_fb.base)[off];
+        int size = sizeof(rgba_t) * (w - xd*2);
+
+        memcpy(dest, src, size);
     }
+
+    DACR_RESET(dacr);
 }

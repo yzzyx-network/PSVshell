@@ -3,7 +3,7 @@
 
 // scaling done internally
 #define GUI_WIDTH  308
-#define GUI_HEIGHT 344
+#define GUI_HEIGHT 368
 
 #define GUI_OSD_HEIGHT 64
 
@@ -25,8 +25,8 @@
 #define GUI_ANCHOR_CX2(len, scale) (GUI_WIDTH / 2 - ((len) * GUI_FONT_W * (scale)) / 2)
 #define GUI_ANCHOR_CY(lines) (GUI_HEIGHT / 2 - ((lines) * GUI_FONT_H) / 2)
 
-#define GUI_RESCALE_X(x) (int)((x) * g_gui_fb_w_ratio)
-#define GUI_RESCALE_Y(y) (int)((y) * g_gui_fb_h_ratio)
+#define GUI_RESCALE_X(x) (int)((x) * (g_gui_fb_w_ratio > 1.0f ? 1.0f : g_gui_fb_w_ratio))
+#define GUI_RESCALE_Y(y) (int)((y) * (g_gui_fb_h_ratio > 1.0f ? 1.0f : g_gui_fb_h_ratio))
 
 #define GUI_GLOBAL_PROFILE_BUTTON_MOD SCE_CTRL_LTRIGGER
 
@@ -44,7 +44,11 @@ typedef enum {
     PSVS_GUI_MODE_HIDDEN,
     PSVS_GUI_MODE_FULL,
     PSVS_GUI_MODE_FPS,
+    PSVS_GUI_MODE_FPS_OLED,
+    PSVS_GUI_MODE_FPS_BATTERY,
+    PSVS_GUI_MODE_BATTERY,
     PSVS_GUI_MODE_OSD,
+    PSVS_GUI_MODE_OSD_OLED,
     PSVS_GUI_MODE_MAX
 } psvs_gui_mode_t;
 
@@ -53,6 +57,7 @@ typedef enum {
     PSVS_GUI_MENUCTRL_GPU_ES4,
     PSVS_GUI_MENUCTRL_BUS,
     PSVS_GUI_MENUCTRL_GPU_XBAR,
+    PSVS_GUI_MENUCTRL_VENEZIA,
     PSVS_GUI_MENUCTRL_PROFILE,
     PSVS_GUI_MENUCTRL_MAX
 } psvs_gui_menu_control_t;
@@ -71,6 +76,7 @@ void psvs_gui_set_text_color2(rgba_t color);
 void psvs_gui_set_text_scale(float scale);
 
 void psvs_gui_dd_fps();
+void psvs_gui_dd_battery();
 
 void psvs_gui_clear();
 void psvs_gui_print(int x, int y, const char *str);

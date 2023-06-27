@@ -2,8 +2,8 @@
 #define _MAIN_H_
 #include "perf.h"
 
-#define PSVS_VERSION_STRING "PSVshell v1.1"
-#define PSVS_VERSION_VER    "PSVS0100"
+#define PSVS_VERSION_STRING "PSVshell v1.3 beta"
+#define PSVS_VERSION_VER    "PSVS0110"
 
 #define DECL_FUNC_HOOK_PATCH_CTRL(index, name) \
     static int name##_patched(int port, SceCtrlData *pad_data, int count) { \
@@ -23,11 +23,30 @@
         return freq; \
     }
 
+#define DACR_UNRESTRICT(state) \
+    asm volatile ("mrc p15, 0, %0, c3, c0, 0\n\t" \
+                  "mcr p15, 0, %1, c3, c0, 0" : "=&r" (state) : "r" (0xffffffff));
+
+#define DACR_RESET(state) \
+    asm volatile ("mcr p15, 0, %0, c3, c0, 0" : : "r" (state));
+
 #define INVALID_PID -1
 
+#define PSVS_FRAMEBUF_HOOK_MAGIC 0x7183015
+
+typedef enum {
+    PSVS_APP_SCESHELL,
+    PSVS_APP_SYSTEM,
+    PSVS_APP_SYSTEM_XCL,
+    PSVS_APP_GAME, // or homebrew
+    PSVS_APP_BLACKLIST, // pspemu
+    PSVS_APP_MAX
+} psvs_app_t;
+
 extern SceUID g_pid;
+extern psvs_app_t g_app;
 extern char g_titleid[32];
-extern bool g_is_in_pspemu;
+
 extern bool g_is_dolce;
 
 extern int (*SceSysmemForKernel_0x3650963F)(uint32_t a1, SceSysmemAddressSpaceInfo *a2);
@@ -42,10 +61,12 @@ extern int (*_kscePowerGetArmClockFrequency)();
 extern int (*_kscePowerGetBusClockFrequency)();
 extern int (*_kscePowerGetGpuEs4ClockFrequency)(int *a1, int *a2);
 extern int (*_kscePowerGetGpuXbarClockFrequency)();
+extern int (*_kscePowerGetVeneziaClockFrequencyForDriver)();
 
 extern int (*_kscePowerSetArmClockFrequency)(int freq);
 extern int (*_kscePowerSetBusClockFrequency)(int freq);
 extern int (*_kscePowerSetGpuEs4ClockFrequency)(int a1, int a2);
 extern int (*_kscePowerSetGpuXbarClockFrequency)(int freq);
+extern int (*_kscePowerSetVeneziaClockFrequencyForDriver)(int freq);
 
 #endif
